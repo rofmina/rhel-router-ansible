@@ -8,9 +8,9 @@
         domain_name: "labnet"
         dns_server_ip: "8.8.8.8"
         cidr: "24"
-        router_static_ip: "10.0.0.1"
-        dhcp_ip_range_start: "10.0.0.2"
-        dhcp_ip_range_end: "10.0.0.16"
+        router_static_ip: "10.0.1.1"
+        dhcp_ip_range_start: "10.0.1.2"
+        dhcp_ip_range_end: "10.0.1.16"
         dhcp_lease_time: "12h"
         netconfig: "ready"
 
@@ -115,7 +115,7 @@
     - name: Insert line in hosts file
       lineinfile:
         path: /etc/hosts
-        line: "10.0.0.1\t{{ ansible_hostname }}"
+        line: "10.0.1.1\t{{ ansible_hostname }}"
 
     - name: Add file to sysctl.d to enable ipv4 forwarding
       copy:
