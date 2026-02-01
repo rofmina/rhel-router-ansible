@@ -1,0 +1,8 @@
+<network>
+  <n>intra-net</n>
+  <bridge name='virbr-internal' stp='on' delay='0'/>
+  <domain name='labnet'/>
+  <!-- Isolated network with no DHCP or NAT -->
+  <!-- The netserver VM will provide routing, DHCP, and DNS -->
+  <!-- This is just a virtual switch that VMs connect to -->
+</network>
