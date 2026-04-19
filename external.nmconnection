@@ -2,15 +2,19 @@
 id=External
 uuid=2b9cbfdf-a855-4821-90ae-2d1bf10436c4
 type=ethernet
-autoconnect-priority=-999
+autoconnect=true
+autoconnect-priority=200
 interface-name={{ external_net_interface }}
 
 [ethernet]
 mac-address={{ external_net_mac }}
 
 [ipv4]
-dns={{ router_static_ip }};
-method=auto
+method=manual
+address1={{ external_static_ip }}/{{ external_cidr }}
+gateway={{ external_gateway }}
+dns={{ external_dns }};{{ external_dns2 }};
+never-default=false
 
 [ipv6]
 addr-gen-mode=stable-privacy

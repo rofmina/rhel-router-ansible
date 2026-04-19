@@ -1,14 +1,15 @@
 [connection]
-id=Internal
+id=Intranet
 uuid=cb952195-0627-4c0a-95b3-2071b5b1eb9c
 type=ethernet
-interface-name={{ internal_net_interface }}
+autoconnect=true
+interface-name={{ intranet_interface }}
 
 [ethernet]
-mac-address={{ internal_net_mac }}
+mac-address={{ intranet_mac }}
 
 [ipv4]
-address1={{ router_static_ip }}/{{ cidr }}
+address1={{ intranet_static_ip }}/{{ intranet_cidr }}
 method=manual
 never-default=true
 

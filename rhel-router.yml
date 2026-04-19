@@ -1,82 +1,98 @@
 ---
-- name: rhel-router
+- name: rhel-router-3nic
   hosts: all
   become: yes
+  vars:
+    # External (bridge) - highest priority
+    external_static_ip: "10.0.0.190"
+    external_cidr: "24"
+    external_gateway: "10.0.0.1"
+    external_dns: "24.200.243.189"
+    external_dns2: "24.201.245.77"
+
+    # External-nat (WiFi/fallback) - auto DHCP
+
+    # Intranet (internal VMs)
+    intranet_static_ip: "10.0.1.1"
+    intranet_cidr: "24"
+    domain_name: "labnet"
+    dns_server_ip: "{{ external_dns }}"
+    dhcp_ip_range_start: "10.0.1.2"
+    dhcp_ip_range_end: "10.0.1.16"
+    dhcp_lease_time: "12h"
+
   tasks:
-    - name: Set some basic facts for config files
-      set_fact:
-        domain_name: "labnet"
-        dns_server_ip: "8.8.8.8"
-        cidr: "24"
-        router_static_ip: "10.0.1.1"
-        dhcp_ip_range_start: "10.0.1.2"
-        dhcp_ip_range_end: "10.0.1.16"
-        dhcp_lease_time: "12h"
-        netconfig: "ready"
-
-    - name: Check to make sure there are only three network interfaces (including lo) or fail
+    - name: Check to make sure there are only four network interfaces (including lo)
       fail:
-        msg: "There are {{ ansible_interfaces | length }} interfaces. I support only three."
-      when: ansible_interfaces | length != 3
+        msg: "There are {{ ansible_interfaces | length }} interfaces. Expected 4 (lo + 3 NICs)."
+      when: ansible_interfaces | length != 4
 
-    - name: Delete old Internal nmconnection and wait as to avoid the possible next fail
-      shell: "nmcli con del Internal; nmcli con reload; sleep 4"
-      
-    - name: Refresh facts for next part
+    - name: Delete old connections and reload NetworkManager
+      shell: |
+        nmcli -t -f NAME,UUID con show | while IFS=: read -r name uuid; do
+          if [[ "$name" != "lo" ]]; then
+            nmcli con del "$uuid" 2>/dev/null || true
+          fi
+        done
+        nmcli con reload
+        sleep 2
+
+    - name: Refresh facts after cleanup
       setup:
 
-    - name: Gather facts about Internal (unused) network interface
+    - name: Identify interfaces by MAC address patterns
       set_fact:
-        internal_net_interface: "{{ hostvars[inventory_hostname]['ansible_'+item]['device'] }}"
-        internal_net_mac: "{{ hostvars[inventory_hostname]['ansible_'+item]['macaddress'] }}"
-      when:
-        - hostvars[inventory_hostname]['ansible_'+item].ipv4 is not defined
+        # Get interface details from ansible facts
+        interface_info: "{{ interface_info | default([]) +
+          [{'name': item,
+            'mac': hostvars[inventory_hostname]['ansible_' + item].macaddress | default(''),
+            'has_ip': hostvars[inventory_hostname]['ansible_' + item].ipv4 is defined}] }}"
       with_items: "{{ ansible_interfaces }}"
-      
-    - name: Fail when all interfaces have an ip address
-      fail:
-        msg: "All interfaces are currently assigned an ip address. You need one that is not configured for the internal network. Try deleting the connection in NM and reload the connections."
-      when: internal_net_interface is not defined
+      when: item != 'lo'
 
-    - name: Gather facts about External network interface
+    - name: Debug interface info
+      debug:
+        var: interface_info
+
+    - name: Assign External interface (enp1s0 - bridge connection)
       set_fact:
-        external_net_interface: "{{ hostvars[inventory_hostname]['ansible_default_ipv4']['interface'] }}"
-        external_net_mac: "{{ hostvars[inventory_hostname]['ansible_default_ipv4']['macaddress'] }}"
+        external_net_interface: "enp1s0"
+        external_net_mac: "{{ hostvars[inventory_hostname]['ansible_enp1s0'].macaddress }}"
+      when: "'enp1s0' in ansible_interfaces"
+
+    - name: Fail if enp1s0 not found
+      fail:
+        msg: "enp1s0 not found. Expected interfaces: enp1s0, enp2s0, enp3s0"
+      when: external_net_interface is not defined
+
+    - name: Assign External-nat interface (enp2s0 - WiFi/fallback)
+      set_fact:
+        external_nat_interface: "enp2s0"
+        external_nat_mac: "{{ hostvars[inventory_hostname]['ansible_enp2s0'].macaddress }}"
+      when: "'enp2s0' in ansible_interfaces"
+
+    - name: Assign Intranet interface (enp3s0 - internal VMs)
+      set_fact:
+        intranet_interface: "enp3s0"
+        intranet_mac: "{{ hostvars[inventory_hostname]['ansible_enp3s0'].macaddress }}"
+      when: "'enp3s0' in ansible_interfaces"
+
+    - name: Debug interface assignments
+      debug:
+        msg:
+          - "External (enp1s0): {{ external_net_interface }} ({{ external_net_mac }}) - Static IP {{ external_static_ip }}"
+          - "External-nat (enp2s0): {{ external_nat_interface }} ({{ external_nat_mac }}) - DHCP fallback"
+          - "Intranet (enp3s0): {{ intranet_interface }} ({{ intranet_mac }}) - Static IP {{ intranet_static_ip }}"
 
     - name: Configure NetworkManager connections
       block:
-        - name: Check about internal interface
-          debug:
-            msg: "Internal {{ internal_net_interface }} mac {{ internal_net_mac }}"
-
-        - name: Check about external interface
-          debug:
-            msg: "External {{ external_net_interface }} mac {{ external_net_mac }}"
-
-        - name: Check hostname
-          debug:
-            msg: "{{ ansible_hostname }}"
-
-        - name: Delete any old connections so we can start over
-          file:
-            state: absent
-            path: /etc/NetworkManager/system-connections
-         
-        - name: Recreate the directory
+        - name: Ensure system-connections directory exists
           file:
             state: directory
             path: /etc/NetworkManager/system-connections
-            mode: '0600'
-        
-        - name: Install internal net template configuration file for NetworkManager
-          template:
-            src: internal.nmconnection
-            dest: /etc/NetworkManager/system-connections/internal.nmconnection
-            owner: root
-            group: root
-            mode: '0600'
-        
-        - name: Install external net template configuration file for NetworkManager
+            mode: '0700'
+
+        - name: Install External connection (bridge - priority 200)
           template:
             src: external.nmconnection
             dest: /etc/NetworkManager/system-connections/external.nmconnection
@@ -84,9 +100,40 @@
             group: root
             mode: '0600'
 
+        - name: Install External-nat connection (WiFi fallback - priority 100)
+          template:
+            src: external-nat.nmconnection
+            dest: /etc/NetworkManager/system-connections/external-nat.nmconnection
+            owner: root
+            group: root
+            mode: '0600'
+
+        - name: Install Intranet connection (internal VMs)
+          template:
+            src: intranet.nmconnection
+            dest: /etc/NetworkManager/system-connections/intranet.nmconnection
+            owner: root
+            group: root
+            mode: '0600'
+
         - name: Reload NetworkManager connections
-          shell: "nmcli con reload"
-      when: netconfig == 'ready'
+          shell: "nmcli con reload && sleep 2"
+
+        - name: Activate External connection (highest priority)
+          shell: "nmcli con up External || true"
+
+        - name: Wait for External connection to come up
+          wait_for:
+            timeout: 10
+
+        - name: Check if External connection has IP
+          shell: "nmcli -g IP4.ADDRESS con show External | head -1"
+          register: external_ip_check
+          ignore_errors: true
+
+        - name: Activate External-nat if External has no IP
+          shell: "nmcli con up External-nat || true"
+          when: external_ip_check.stdout == ""
 
     - name: Update packages
       yum:
@@ -115,31 +162,85 @@
     - name: Insert line in hosts file
       lineinfile:
         path: /etc/hosts
-        line: "10.0.1.1\t{{ ansible_hostname }}"
+        line: "{{ intranet_static_ip }}\t{{ ansible_hostname }}"
 
-    - name: Add file to sysctl.d to enable ipv4 forwarding
-      copy:
-        content: "net.ipv4.ip_forward=1"
-        dest: /etc/sysctl.d/ip4fw.conf
-        
-    - name: Load new sysctl settings
-      shell: "sysctl -p /etc/sysctl.d/ip4fw.conf"
-      
+    - name: Enable IPv4 forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        sysctl_set: true
+        state: present
+        reload: true
+
     - name: Set default firewalld zone to internal
-      shell: "firewall-cmd --set-default-zone internal; firewall-cmd --reload"
-        
-  vars:
-    firewall:
-      - name: Adding DNS and DHCP exceptions
-        service: [dns,dhcp]
-        zone: internal
-        state: enabled
-        permanent: true
+      shell: |
+        firewall-cmd --set-default-zone internal
+        firewall-cmd --reload
 
-      - name: Enable IP masquerading on internal
-        masquerade: yes
-        zone: internal
-        state: enabled
-        permanent: true
-  roles:
-    - rhel-system-roles.firewall
+    - name: Configure firewall for router
+      block:
+        - name: Enable masquerading on internal zone
+          firewalld:
+            masquerade: yes
+            zone: internal
+            permanent: true
+            immediate: true
+            state: enabled
+
+        - name: Allow DNS and DHCP services
+          firewalld:
+            service: "{{ item }}"
+            zone: internal
+            permanent: true
+            immediate: true
+            state: enabled
+          loop:
+            - dns
+            - dhcp
+
+        - name: Allow external interface in public zone
+          firewalld:
+            interface: "{{ external_net_interface }}"
+            zone: public
+            permanent: true
+            immediate: true
+            state: enabled
+          ignore_errors: true
+
+        - name: Allow external-nat interface in public zone
+          firewalld:
+            interface: "{{ external_nat_interface }}"
+            zone: public
+            permanent: true
+            immediate: true
+            state: enabled
+          ignore_errors: true
+
+        - name: Reload firewalld
+          command: firewall-cmd --reload
+
+    - name: Display final network status
+      shell: |
+        echo "=== Network Connections ==="
+        nmcli con show --active
+        echo ""
+        echo "=== IP Addresses ==="
+        ip -4 addr show
+        echo ""
+        echo "=== Default Route ==="
+        ip route | grep default
+        echo ""
+        echo "=== Internet Connectivity Test ==="
+        ping -c 2 -W 3 8.8.8.8 && echo "Internet: OK" || echo "Internet: FAILED"
+      register: network_status
+      ignore_errors: true
+
+    - name: Show network status
+      debug:
+        var: network_status.stdout_lines
+
+  handlers:
+    - name: reload NetworkManager
+      service:
+        name: NetworkManager
+        state: reloaded

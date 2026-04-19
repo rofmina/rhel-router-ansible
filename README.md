@@ -5,31 +5,46 @@ Simple playbook to provision an IPv4 NAT router with DNS and DHCP on RHEL. Inten
 ## Overview
 
 This Ansible playbook configures a RHEL-based VM as a network router providing:
+- **Dual uplink support** - Bridge (priority) or WiFi/NAT fallback
 - **NAT routing** - Routes traffic from internal network to internet
 - **DHCP server** - Assigns IPs to client VMs (10.0.1.2 - 10.0.1.16)
 - **DNS server** - Provides DNS resolution for internal network
 - **Domain**: labnet
 
-## Network Topology
+## Network Topology (3-NIC)
 
 ```
-Internet
-   |
-   |
-[KVM Host]
-   |
-   +--- External Network (default/NAT/bridge)
-   |         |
-   |    [netserver - NIC1: Gets internet via DHCP]
-   |         |
-   |    [netserver - NIC2: 10.0.1.1/24]
-   |         |
-   +--- Internal Network (isolated)
-             |
-        [Client VMs - DHCP: 10.0.1.2-10.0.1.16]
-             |
-        Route through netserver to internet
+                    Internet
+                       |
+         ______________|______________
+        |                            |
+   [Bridge]                    [WiFi/NAT]
+      |                              |
+[enp1s0]                      [enp2s0]
+External                          External-nat
+(Static IP)                       (DHCP fallback)
+priority: 200                     priority: 100
+      |______________________________|
+                   |
+            [netserver]
+                   |
+            [enp3s0]
+            Intranet
+          10.0.1.1/24
+                   |
+   +---------------+---------------+
+   |               |               |
+[VM1]           [VM2]           [VM3]
+10.0.1.2      10.0.1.3       10.0.1.x
 ```
+
+## Interface Roles
+
+| Interface | Name | Purpose | Priority | Configuration |
+|-----------|------|---------|----------|---------------|
+| enp1s0 | External | Bridge/Ethernet (primary) | 200 | Static IP |
+| enp2s0 | External-nat | WiFi/NAT (fallback) | 100 | DHCP |
+| enp3s0 | Intranet | Internal VMs | auto | Static 10.0.1.1/24 |
 
 ## Prerequisites
 
@@ -80,7 +95,7 @@ sudo virsh net-list --all
 
 ### 3. Create/Configure netserver VM
 
-The netserver VM **MUST have exactly TWO network interfaces**:
+The netserver VM **MUST have exactly THREE network interfaces**:
 
 **Method 1: Create new VM with virt-install**
 ```bash
@@ -90,24 +105,28 @@ virt-install \
   --vcpus 2 \
   --disk size=20 \
   --cdrom /path/to/rhel.iso \
+  --network bridge=br0 \
   --network network=default \
   --network network=intra-net \
   --graphics vnc \
   --os-variant rhel9.0
 ```
 
-**Method 2: Add second NIC to existing VM**
+**Method 2: Add NICs to existing VM**
 ```bash
 # Shutdown the VM
 sudo virsh shutdown netserver
 
-# Attach to internal network
+# Attach to default network (WiFi/NAT fallback)
+sudo virsh attach-interface netserver network default --model virtio --config --persistent
+
+# Attach to internal network (for VMs)
 sudo virsh attach-interface netserver network intra-net --model virtio --config --persistent
 
 # Start the VM
 sudo virsh start netserver
 
-# Verify both NICs
+# Verify all 3 NICs
 sudo virsh domiflist netserver
 ```
 
@@ -115,8 +134,9 @@ You should see:
 ```
 Interface   Type      Source      Model
 ---------------------------------------------
-vnet0       network   default     virtio    <- External (internet)
-vnet1       network   intra-net   virtio    <- Internal (lab network)
+vnet0       bridge    br0         virtio    <- External (bridge - priority 200)
+vnet1       network   default     virtio    <- External-nat (WiFi/NAT fallback - priority 100)
+vnet2       network   intra-net   virtio    <- Intranet (VM network - 10.0.1.1/24)
 ```
 
 ### 4. Install Ansible on netserver
@@ -143,12 +163,14 @@ ansible-playbook -i inventory.ini rhel-router.yml
 ```
 
 The playbook will:
-1. Verify you have exactly 3 network interfaces (lo + 2 NICs)
-2. Identify external (has IP) and internal (no IP) interfaces
-3. Configure NetworkManager connections
-4. Install and configure dnsmasq for DHCP/DNS
-5. Enable IP forwarding
-6. Configure firewall with masquerading
+1. Verify you have exactly 4 network interfaces (lo + 3 NICs)
+2. Configure 3 NetworkManager connections:
+   - **External** (enp1s0): Bridge, priority 200, static IP
+   - **External-nat** (enp2s0): DHCP, priority 100, auto fallback
+   - **Intranet** (enp3s0): Static 10.0.1.1/24 for VMs
+3. Install and configure dnsmasq for DHCP/DNS
+4. Enable IP forwarding
+5. Configure firewall with masquerading
 
 ### 3. Verify installation
 
@@ -158,8 +180,9 @@ ip addr show
 
 # Should see:
 # - lo: 127.0.0.1
-# - External NIC: IP from DHCP (e.g., 192.168.122.x)
-# - Internal NIC: 10.0.1.1/24
+# - External (enp1s0): 10.0.0.190/24 (or your static IP)
+# - External-nat (enp2s0): IP from DHCP (e.g., 192.168.122.x) - may not be active
+# - Intranet (enp3s0): 10.0.1.1/24
 
 # Check services
 systemctl status dnsmasq
@@ -214,28 +237,26 @@ ping -c 4 google.com    # DNS + internet
 - **Upstream DNS**: 8.8.8.8
 
 ### Files Modified by Playbook
-- `/etc/NetworkManager/system-connections/internal.nmconnection`
-- `/etc/NetworkManager/system-connections/external.nmconnection`
+- `/etc/NetworkManager/system-connections/external.nmconnection` (enp1s0 - bridge)
+- `/etc/NetworkManager/system-connections/external-nat.nmconnection` (enp2s0 - DHCP fallback)
+- `/etc/NetworkManager/system-connections/intranet.nmconnection` (enp3s0 - internal)
 - `/etc/dnsmasq.conf`
-- `/etc/sysctl.d/ip4fw.conf`
 - `/etc/hosts`
 
 ## Troubleshooting
 
-### Playbook fails: "There are X interfaces. I support only three."
+### Playbook fails: "There are X interfaces. Expected 4."
 - **Cause**: VM has wrong number of network interfaces
-- **Fix**: Ensure VM has exactly 2 NICs (plus loopback = 3 total)
+- **Fix**: Ensure VM has exactly 3 NICs (plus loopback = 4 total)
 ```bash
 sudo virsh domiflist netserver
+# Should show: bridge + default + intra-net
 ```
 
-### Playbook fails: "All interfaces are currently assigned an ip address"
-- **Cause**: Both NICs have IPs, no interface available for internal network
-- **Fix**: One NIC must have no IP. Delete auto-created connection:
-```bash
-sudo nmcli connection show
-sudo nmcli connection delete "Wired connection 1"  # or similar name
-```
+### External-nat interface is not activating
+- **Cause**: External (bridge) has higher priority and is active
+- **This is expected behavior**: External (priority 200) takes precedence over External-nat (priority 100)
+- **If External fails**, External-nat should auto-activate if NetworkManager is configured correctly
 
 ### Client VM not getting DHCP
 - **Check**: Is client attached to `intra-net` network?
@@ -278,18 +299,26 @@ sudo reboot
 
 ## Customization
 
-To change network settings, edit the variables in `rhel-router.yml`:
+To change network settings, edit the variables at the top of `rhel-router.yml`:
 
 ```yaml
-- name: Set some basic facts for config files
-  set_fact:
-    domain_name: "labnet"           # Change domain name
-    dns_server_ip: "8.8.8.8"        # Change upstream DNS
-    cidr: "24"                      # Change subnet mask
-    router_static_ip: "10.0.1.1"    # Change router IP
-    dhcp_ip_range_start: "10.0.1.2" # Change DHCP range start
-    dhcp_ip_range_end: "10.0.1.16"  # Change DHCP range end
-    dhcp_lease_time: "12h"          # Change lease time
+vars:
+  # External (bridge) - enp1s0 - priority 200
+  external_static_ip: "10.0.0.190"  # Change bridge static IP
+  external_cidr: "24"
+  external_gateway: "10.0.0.1"         # Change gateway
+  external_dns: "10.0.0.1"           # Change DNS server
+
+  # External-nat (enp2s0) - priority 100 - DHCP auto
+
+  # Intranet (enp3s0) - internal VMs
+  intranet_static_ip: "10.0.1.1"     # Change internal router IP
+  intranet_cidr: "24"
+  domain_name: "labnet"
+  dns_server_ip: "8.8.8.8"
+  dhcp_ip_range_start: "10.0.1.2"
+  dhcp_ip_range_end: "10.0.1.16"
+  dhcp_lease_time: "12h"
 ```
 
 After changing, re-run the playbook.
@@ -362,8 +391,9 @@ sudo nmcli connection up <connection>
 - firewalld
 - dnsmasq (installed by playbook)
 - KVM/libvirt host with:
-  - External network (default or custom bridge)
-  - Internal network (intra-net, created by setup script)
+  - Bridge interface (e.g., br0) for primary connection
+  - External network (default/NAT) for WiFi fallback
+  - Internal network (intra-net, created by setup script) for VMs
 
 ## License
 

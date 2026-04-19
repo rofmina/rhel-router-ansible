@@ -1,0 +1,20 @@
+[connection]
+id=External-nat
+uuid=af57a90d-e659-41cd-8151-254faf104942
+type=ethernet
+autoconnect=true
+autoconnect-priority=100
+interface-name={{ external_nat_interface }}
+
+[ethernet]
+mac-address={{ external_nat_mac }}
+
+[ipv4]
+method=auto
+never-default=false
+
+[ipv6]
+addr-gen-mode=stable-privacy
+method=auto
+
+[proxy]
