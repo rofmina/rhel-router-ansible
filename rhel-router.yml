@@ -165,12 +165,9 @@
         line: "{{ intranet_static_ip }}\t{{ ansible_hostname }}"
 
     - name: Enable IPv4 forwarding
-      sysctl:
-        name: net.ipv4.ip_forward
-        value: '1'
-        sysctl_set: true
-        state: present
-        reload: true
+      shell: |
+        echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/ip4fw.conf
+        sysctl -p /etc/sysctl.d/ip4fw.conf
 
     - name: Set default firewalld zone to internal
       shell: |
@@ -180,40 +177,28 @@
     - name: Configure firewall for router
       block:
         - name: Enable masquerading on internal zone
-          firewalld:
-            masquerade: yes
-            zone: internal
-            permanent: true
-            immediate: true
-            state: enabled
+          shell: |
+            firewall-cmd --zone=internal --add-masquerade --permanent
+            firewall-cmd --zone=internal --add-masquerade
 
         - name: Allow DNS and DHCP services
-          firewalld:
-            service: "{{ item }}"
-            zone: internal
-            permanent: true
-            immediate: true
-            state: enabled
+          shell: |
+            firewall-cmd --zone=internal --add-service={{ item }} --permanent
+            firewall-cmd --zone=internal --add-service={{ item }}
           loop:
             - dns
             - dhcp
 
         - name: Allow external interface in public zone
-          firewalld:
-            interface: "{{ external_net_interface }}"
-            zone: public
-            permanent: true
-            immediate: true
-            state: enabled
+          shell: |
+            firewall-cmd --zone=public --add-interface={{ external_net_interface }} --permanent || true
+            firewall-cmd --zone=public --add-interface={{ external_net_interface }} || true
           ignore_errors: true
 
         - name: Allow external-nat interface in public zone
-          firewalld:
-            interface: "{{ external_nat_interface }}"
-            zone: public
-            permanent: true
-            immediate: true
-            state: enabled
+          shell: |
+            firewall-cmd --zone=public --add-interface={{ external_nat_interface }} --permanent || true
+            firewall-cmd --zone=public --add-interface={{ external_nat_interface }} || true
           ignore_errors: true
 
         - name: Reload firewalld
