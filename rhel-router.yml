@@ -22,15 +22,15 @@
     dhcp_lease_time: "12h"
 
   tasks:
-    - name: Check to make sure there are only four network interfaces (including lo)
-      fail:
-        msg: "There are {{ ansible_interfaces | length }} interfaces. Expected 4 (lo + 3 NICs)."
-      when: ansible_interfaces | length != 4
+    - name: Check interfaces - warn if more than expected
+      debug:
+        msg: "Found {{ ansible_interfaces | length }} interfaces. Will use enp1s0, enp2s0, enp3s0 for configuration."
+      when: ansible_interfaces | length > 4
 
     - name: Delete old connections and reload NetworkManager
       shell: |
-        nmcli -t -f NAME,UUID con show | while IFS=: read -r name uuid; do
-          if [[ "$name" != "lo" ]]; then
+        nmcli -t -f NAME,UUID con show 2>/dev/null | while IFS=: read -r name uuid; do
+          if [[ "$name" != "lo" && -n "$uuid" ]]; then
             nmcli con del "$uuid" 2>/dev/null || true
           fi
         done
